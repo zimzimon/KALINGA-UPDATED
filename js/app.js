@@ -365,6 +365,13 @@ const requests = {
   openRequestModal() {
     const tpl = el('template-request-modal').innerHTML;
     ui.openModal(tpl);
+    const dtInput = el('req-datetime');
+    if (dtInput) {
+      const now = new Date(Date.now() + 60 * 60000);
+      const min = now.toISOString().slice(0, 16);
+      dtInput.min = min;
+      dtInput.value = min;
+    }
   },
   submitRequest() {
     const type = el('req-type').value;
@@ -415,9 +422,84 @@ const matching = {
               <div class="jfi-title">${p.name} — ${p.specialtyLabel}</div>
               <div class="jfi-sub">${starsHTML(p.rating, 11)} ${p.rating} (${p.ratingCount}) · ₱${p.rate}/hr</div>
             </div>
-            <button class="btn-small" onclick="App.chatModule.openChat('${p.id}')">Chat</button>
+            <div class="pcr-actions" style="flex-direction:row;">
+              <button class="btn-small" style="background:var(--success)" onclick="App.hiring.openHireModal('${p.id}')">Hire</button>
+              <button class="btn-small" onclick="App.chatModule.openChat('${p.id}')">Chat</button>
+            </div>
           </div>`).join('')}
       </div>`);
+  }
+};
+
+/* ───────────────────────────────────────────
+   HIRING — direct hire of a specific provider
+─────────────────────────────────────────── */
+const hiring = {
+  openHireModal(providerId) {
+    const p = Store.get('providers', []).find(x => x.id === providerId);
+    if (!p) return;
+    if (!p.available) { toast.show(`${p.name} is currently unavailable for new bookings.`, 'warning'); return; }
+
+    const now = new Date(Date.now() + 60 * 60000);
+    const minDt = now.toISOString().slice(0, 16);
+
+    ui.openModal(`
+      <h3><i class="fa-solid fa-handshake"></i> Hire ${p.name}</h3>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+        <div class="chat-avatar" style="background:${p.color}">${p.avatar}</div>
+        <div>
+          <div class="jfi-title">${p.name}</div>
+          <div class="jfi-sub">${p.specialtyLabel} · ₱${p.rate}/hr · ${starsHTML(p.rating, 11)} ${p.rating}</div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Date & Time</label>
+        <input type="datetime-local" id="hire-datetime" min="${minDt}" value="${minDt}" />
+      </div>
+      <div class="grid-2-col">
+        <div class="form-group">
+          <label>Duration (Hours)</label>
+          <input type="number" id="hire-duration" min="1" value="2" />
+        </div>
+        <div class="form-group">
+          <label>Estimated Total (PHP)</label>
+          <input type="text" id="hire-budget" value="${p.rate * 2}" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Notes for ${p.name.split(' ')[0]}</label>
+        <textarea id="hire-notes" rows="3" placeholder="Any special instructions, address details, or care needs..."></textarea>
+      </div>
+      <button class="btn-primary btn-full" onclick="App.hiring.confirmHire('${p.id}')">
+        <i class="fa-solid fa-paper-plane"></i> Send Hire Request
+      </button>
+    `);
+
+    const durationInput = el('hire-duration');
+    const budgetInput = el('hire-budget');
+    durationInput.oninput = () => { budgetInput.value = (p.rate * Number(durationInput.value || 1)).toFixed(0); };
+  },
+
+  confirmHire(providerId) {
+    const p = Store.get('providers', []).find(x => x.id === providerId);
+    const datetime = el('hire-datetime').value;
+    const duration = Number(el('hire-duration').value);
+    const budget = parseInt(el('hire-budget').value) || 0;
+    const notes = el('hire-notes').value.trim();
+    if (!p || !datetime || !duration) { toast.show('Please complete all fields.', 'warning'); return; }
+
+    const dt = new Date(datetime);
+    const booking = {
+      id: 'b' + Date.now(), clientId: auth.currentUser.id, providerId: p.id, providerName: p.name,
+      service: p.specialtyLabel, date: dt.toISOString().slice(0, 10), time: dt.toTimeString().slice(0, 5),
+      duration, budget, status: 'pending', notes, createdAt: new Date().toISOString()
+    };
+    Store.update('bookings', list => [booking, ...list], []);
+    notifications.push(`Your hire request to ${p.name} has been sent.`, 'fa-handshake');
+
+    ui.closeModal();
+    toast.show(`Hire request sent to ${p.name}! Awaiting confirmation.`, 'success');
+    pages.navigate('bookings');
   }
 };
 
@@ -444,6 +526,7 @@ const providers = {
           <div class="jfi-sub">₱${p.rate}/hr</div>
         </div>
         <div class="pcr-actions">
+          <button class="btn-small" style="background:var(--success)" onclick="App.hiring.openHireModal('${p.id}')">Hire</button>
           <button class="btn-small" onclick="App.chatModule.openChat('${p.id}')">Chat</button>
           <button class="btn-small" style="background:var(--teal)" onclick="App.ratingModule.openProfile('${p.id}')">View</button>
         </div>
@@ -454,7 +537,7 @@ const providers = {
 
   renderProviderHome() {
     const me = auth.currentUser;
-    const today = '2026-06-21';
+    const today = new Date().toISOString().slice(0, 10);
     const todays = Store.get('bookings', []).filter(b => b.providerId === me.id && b.date === today && b.status !== 'cancelled');
     const sched = el('provider-today-schedule');
     sched.innerHTML = todays.length ? todays.map(b => `
@@ -508,6 +591,14 @@ const mapModule = {
       setTimeout(() => mapModule.mapInstance.invalidateSize(), 150);
     }
     mapModule.plot(Store.get('providers', []));
+    mapModule.refreshGpsBox();
+  },
+  refreshGpsBox() {
+    const me = auth.currentUser;
+    const box = el('gps-tracking-box');
+    if (!box) return;
+    const hasActive = me.role === 'client' && Store.get('bookings', []).some(b => b.clientId === me.id && b.status === 'confirmed');
+    hasActive ? show(box) : hide(box);
   },
   plot(list) {
     mapModule.markersLayer.clearLayers();
@@ -617,7 +708,10 @@ const ratingModule = {
       </div>
       <p style="font-size:13px;color:var(--text-secondary);margin-bottom:14px;">${p.bio}</p>
       ${reviews.map(r => `<div class="request-summary-item"><div class="rsi-main"><div class="rsi-title">${starsHTML(r.score, 11)}</div><div class="rsi-sub">${r.comment}</div></div></div>`).join('') || '<p style="font-size:12px;color:var(--text-hint)">No reviews yet.</p>'}
-      <button class="btn-primary btn-full" style="margin-top:16px;" onclick="App.chatModule.openChat('${p.id}')"><i class="fa-solid fa-comment"></i> Message ${p.name.split(' ')[0]}</button>
+      <div class="grid-2-col" style="margin-top:16px;">
+        <button class="btn-primary" onclick="App.hiring.openHireModal('${p.id}')"><i class="fa-solid fa-handshake"></i> Hire Now</button>
+        <button class="btn-outline" onclick="App.chatModule.openChat('${p.id}')"><i class="fa-solid fa-comment"></i> Message</button>
+      </div>
     `);
   },
   openRateModal(bookingId) {
@@ -853,15 +947,15 @@ const profile = {
       </div>
 
       <div class="menu-list">
-        <div class="menu-item">
+        <div class="menu-item" onclick="App.profile.editProfile()">
           <div class="menu-icon" style="background:#E8EAF6;color:#3949AB"><i class="fa-solid fa-pen"></i></div>
           <span>Edit Profile</span><i class="fa-solid fa-chevron-right"></i>
         </div>
-        <div class="menu-item">
+        <div class="menu-item" onclick="App.profile.notificationSettings()">
           <div class="menu-icon" style="background:#E0F2F1;color:#00897B"><i class="fa-solid fa-bell"></i></div>
           <span>Notification Settings</span><i class="fa-solid fa-chevron-right"></i>
         </div>
-        <div class="menu-item">
+        <div class="menu-item" onclick="App.profile.privacyPolicy()">
           <div class="menu-icon" style="background:#E8F5E9;color:#2E7D32"><i class="fa-solid fa-shield-halved"></i></div>
           <span>Privacy Policy</span><i class="fa-solid fa-chevron-right"></i>
         </div>
@@ -880,6 +974,154 @@ const profile = {
       </button>
       <p style="text-align:center;font-size:11px;color:var(--text-hint);margin-top:12px;">KALINGA v1.0 · Data stored locally</p>
     `;
+  },
+
+  editProfile() {
+    const u = auth.currentUser;
+    const isProvider = u.role === 'provider';
+    const colors = ['#1565C0', '#00897B', '#7B1FA2', '#E53935', '#0288D1', '#F57C00', '#388E3C', '#3949AB'];
+
+    ui.openModal(`
+      <h3><i class="fa-solid fa-pen"></i> Edit Profile</h3>
+      <div class="form-group">
+        <label>Full Name</label>
+        <input type="text" id="edit-name" value="${u.name}" />
+      </div>
+      <div class="form-group">
+        <label>Email</label>
+        <input type="email" id="edit-email" value="${u.email}" />
+      </div>
+      ${isProvider ? `
+      <div class="form-group">
+        <label>Specialization</label>
+        <select id="edit-specialty">
+          ${Object.entries(TYPE_LABELS).map(([val, label]) => `<option value="${val}" ${u.specialty === val ? 'selected' : ''}>${label}</option>`).join('')}
+        </select>
+      </div>
+      <div class="grid-2-col">
+        <div class="form-group">
+          <label>Hourly Rate (₱)</label>
+          <input type="number" id="edit-rate" min="100" value="${u.rate}" />
+        </div>
+        <div class="form-group">
+          <label>Availability</label>
+          <select id="edit-available">
+            <option value="true" ${u.available ? 'selected' : ''}>Available</option>
+            <option value="false" ${!u.available ? 'selected' : ''}>Unavailable</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Bio</label>
+        <textarea id="edit-bio" rows="3">${u.bio || ''}</textarea>
+      </div>` : ''}
+      <div class="form-group">
+        <label>Avatar Color</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          ${colors.map(c => `<div onclick="App.profile.pickColor('${c}')" data-color="${c}" class="avatar-swatch ${u.color === c ? 'selected' : ''}" style="width:30px;height:30px;border-radius:50%;background:${c};cursor:pointer;border:3px solid ${u.color === c ? '#1A1A2E' : 'transparent'};"></div>`).join('')}
+        </div>
+      </div>
+      <div class="form-group">
+        <label>New Password <span style="text-transform:none;font-weight:400;">(optional)</span></label>
+        <input type="password" id="edit-password" placeholder="Leave blank to keep current password" />
+      </div>
+      <div class="form-error hidden" id="edit-profile-error"></div>
+      <button class="btn-primary btn-full" onclick="App.profile.saveProfile()"><i class="fa-solid fa-floppy-disk"></i> Save Changes</button>
+    `);
+    profile.selectedColor = u.color;
+  },
+
+  selectedColor: null,
+  pickColor(c) {
+    profile.selectedColor = c;
+    document.querySelectorAll('.avatar-swatch').forEach(sw => {
+      sw.style.border = sw.dataset.color === c ? '3px solid #1A1A2E' : '3px solid transparent';
+    });
+  },
+
+  saveProfile() {
+    const u = auth.currentUser;
+    const isProvider = u.role === 'provider';
+    const name = el('edit-name').value.trim();
+    const email = el('edit-email').value.trim().toLowerCase();
+    const password = el('edit-password').value;
+    const errBox = el('edit-profile-error');
+
+    if (!name || !email) { errBox.textContent = 'Name and email are required.'; show(errBox); return; }
+    const all = [...Store.get('users', []), ...Store.get('providers', [])];
+    if (all.some(x => x.id !== u.id && x.email.toLowerCase() === email)) {
+      errBox.textContent = 'That email is already in use by another account.'; show(errBox); return;
+    }
+    if (password && password.length < 6) { errBox.textContent = 'New password must be 6+ characters.'; show(errBox); return; }
+    hide(errBox);
+
+    const updates = { name, email, color: profile.selectedColor || u.color };
+    if (password) updates.password = password;
+    if (isProvider) {
+      updates.specialty = el('edit-specialty').value;
+      updates.specialtyLabel = TYPE_LABELS[updates.specialty] || updates.specialty;
+      updates.rate = Number(el('edit-rate').value) || u.rate;
+      updates.available = el('edit-available').value === 'true';
+      updates.bio = el('edit-bio').value.trim();
+    }
+
+    const storeKey = isProvider ? 'providers' : 'users';
+    Store.update(storeKey, list => list.map(x => x.id === u.id ? { ...x, ...updates } : x), []);
+    auth.currentUser = { ...u, ...updates };
+    Store.set('currentUserId', u.id);
+
+    ui.closeModal();
+    toast.show('Profile updated successfully!', 'success');
+    profile.render();
+  },
+
+  notificationSettings() {
+    const prefs = Store.get('notifPrefs', { bookings: true, messages: true, promos: false });
+    ui.openModal(`
+      <h3><i class="fa-solid fa-bell"></i> Notification Settings</h3>
+      <div class="menu-list">
+        <label class="menu-item" style="cursor:pointer;">
+          <div class="menu-icon" style="background:#E3F2FD;color:#1565C0"><i class="fa-solid fa-calendar-check"></i></div>
+          <span>Booking Updates</span>
+          <input type="checkbox" id="pref-bookings" ${prefs.bookings ? 'checked' : ''} style="width:18px;height:18px;" />
+        </label>
+        <label class="menu-item" style="cursor:pointer;">
+          <div class="menu-icon" style="background:#E0F2F1;color:#00897B"><i class="fa-solid fa-comments"></i></div>
+          <span>New Messages</span>
+          <input type="checkbox" id="pref-messages" ${prefs.messages ? 'checked' : ''} style="width:18px;height:18px;" />
+        </label>
+        <label class="menu-item" style="cursor:pointer;">
+          <div class="menu-icon" style="background:#FFF8E1;color:#F57C00"><i class="fa-solid fa-tag"></i></div>
+          <span>Promotions & Tips</span>
+          <input type="checkbox" id="pref-promos" ${prefs.promos ? 'checked' : ''} style="width:18px;height:18px;" />
+        </label>
+      </div>
+      <button class="btn-primary btn-full" onclick="App.profile.saveNotifPrefs()"><i class="fa-solid fa-floppy-disk"></i> Save Preferences</button>
+    `);
+  },
+
+  saveNotifPrefs() {
+    const prefs = {
+      bookings: el('pref-bookings').checked,
+      messages: el('pref-messages').checked,
+      promos: el('pref-promos').checked
+    };
+    Store.set('notifPrefs', prefs);
+    ui.closeModal();
+    toast.show('Notification preferences saved.', 'success');
+  },
+
+  privacyPolicy() {
+    ui.openModal(`
+      <h3><i class="fa-solid fa-shield-halved"></i> Privacy Policy</h3>
+      <p style="font-size:13px;color:var(--text-secondary);line-height:1.7;">
+        KALINGA stores your account, booking, and chat data locally in your browser for this prototype demo —
+        nothing is transmitted to an external server. Clearing your browser storage will remove all data.
+        In a production deployment, this section would describe how personal and health-related information
+        is collected, stored securely, and used strictly to match clients with caregivers.
+      </p>
+      <button class="btn-outline btn-full" style="margin-top:16px;" onclick="App.ui.closeModal()">Close</button>
+    `);
   }
 };
 
@@ -910,6 +1152,6 @@ init();
 /* ───────────────────────────────────────────
    PUBLIC API (used by inline onclick handlers)
 ─────────────────────────────────────────── */
-return { auth, ui, pages, toast, notifications, requests, matching, providers, mapModule, map: mapModule, bookings, ratingModule, chatModule, chat: chatModule, chatbot, admin, profile };
+return { auth, ui, pages, toast, notifications, requests, matching, hiring, providers, mapModule, map: mapModule, bookings, ratingModule, chatModule, chat: chatModule, chatbot, admin, profile };
 
 })(); // end App IIFE
